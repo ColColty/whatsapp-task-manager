@@ -1,29 +1,21 @@
-# Create T3 App
+# Whatsapp task manager
 
-This is a [T3 Stack](https://create.t3.gg/) project bootstrapped with `create-t3-app`.
+## Problem
 
-## What's next? How do I make an app with this?
+I want to keep track of the work it needs to be done in my garden as well as in my builds.
+But we don't want to get people to download, create an account and manage a different service like Linear or Asana to track tasks.
 
-We try to keep this project as simple as possible, so you can start with just the scaffolding we set up for you, and add additional things later when they become necessary.
+## Solution
 
-If you are not familiar with the different technologies used in this project, please refer to the respective docs. If you still are in the wind, please join our [Discord](https://t3.gg/discord) and ask for help.
+Would be great to use our main communication tool, Whatsapp, to get updates and send tasks to the corresponding people.
+A new conversation or group would be created with each member, or you can create conversations with different members together, and a bot, will send and request updates.
 
-- [Next.js](https://nextjs.org)
-- [NextAuth.js](https://next-auth.js.org)
-- [Prisma](https://prisma.io)
-- [Drizzle](https://orm.drizzle.team)
-- [Tailwind CSS](https://tailwindcss.com)
-- [tRPC](https://trpc.io)
+The manager will be able to through a UI, or /task in the conversation, to add new tasks and assign them to each user.
+The assigned user, will use that reminder message that was sent by the bot, to reply to it, and add videos, messages and so on, and they will be automatically stored and added to that task.
 
-## Learn More
+This will allow the manager to know if the task was done, and how it was done, or if there was some feedback from the user.
+We would use a basic LLM to read the message and understand if the task was finished or if he's asking something, so we can change the status of the task.
 
-To learn more about the [T3 Stack](https://create.t3.gg/), take a look at the following resources:
 
-- [Documentation](https://create.t3.gg/)
-- [Learn the T3 Stack](https://create.t3.gg/en/faq#what-learning-resources-are-currently-available) — Check out these awesome tutorials
-
-You can check out the [create-t3-app GitHub repository](https://github.com/t3-oss/create-t3-app) — your feedback and contributions are welcome!
-
-## How do I deploy this?
-
-Follow our deployment guides for [Vercel](https://create.t3.gg/en/deployment/vercel), [Netlify](https://create.t3.gg/en/deployment/netlify) and [Docker](https://create.t3.gg/en/deployment/docker) for more information.
+The users would be able to use /todo, to get a list of all the tasks they need to do.
+The manager will be able to control the reminders and how it's sent to the users, if it's in the conversation with everyone, or in a personal chat with the assignee.
