@@ -1,0 +1,171 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  matrixUserId  String   @unique
+  phoneNumber   String?
+  displayName   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  assignedTasks Task[]    @relation("AssignedTasks")
+  createdTasks  Task[]    @relation("CreatedTasks")
+  messages      Message[]
+
+  @@index([matrixUserId])
+}
+
+model Group {
+  id          String   @id @default(cuid())
+  matrixRoomId String   @unique
+  whatsappGroupId String?
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tasks    Task[]
+  messages Message[]
+
+  @@index([matrixRoomId])
+  @@index([whatsappGroupId])
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  status      TaskStatus @default(PENDING)
+  priority    TaskPriority @default(MEDIUM)
+
+  groupId     String
+  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  assigneeId  String?
+  assignee    User?    @relation("AssignedTasks", fields: [assigneeId], references: [id])
+
+  createdById String
+  createdBy   User     @relation("CreatedTasks", fields: [createdById], references: [id])
+
+  dueDate     DateTime?
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Matrix message ID of the task assignment message
+  matrixEventId String?
+
+  messages    Message[]
+  attachments Attachment[]
+
+  @@index([groupId])
+  @@index([assigneeId])
+  @@index([createdById])
+  @@index([status])
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  BLOCKED
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Message {
+  id            String   @id @default(cuid())
+  content       String
+  messageType   MessageType @default(TEXT)
+
+  groupId       String
+  group         Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  senderId      String
+  sender        User     @relation(fields: [senderId], references: [id])
+
+  taskId        String?
+  task          Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  // Matrix event ID for tracking
+  matrixEventId String   @unique
+
+  // If this is a reply to another message
+  replyToId     String?
+  replyTo       Message? @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies       Message[] @relation("MessageReplies")
+
+  // AI analysis of the message
+  aiAnalysis    Json?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  attachments   Attachment[]
+
+  @@index([groupId])
+  @@index([senderId])
+  @@index([taskId])
+  @@index([matrixEventId])
+  @@index([createdAt])
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  DOCUMENT
+  AUDIO
+  SYSTEM
+}
+
+model Attachment {
+  id          String   @id @default(cuid())
+  fileName    String
+  mimeType    String
+  fileSize    Int?
+
+  // Store file locally or reference to Matrix content URI
+  filePath    String?
+  matrixMxcUrl String?
+
+  messageId   String?
+  message     Message? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  taskId      String?
+  task        Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@index([messageId])
+  @@index([taskId])
+}
+
+model Reminder {
+  id          String   @id @default(cuid())
+  taskId      String
+  scheduledFor DateTime
+  sent        Boolean  @default(false)
+  sentAt      DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([taskId])
+  @@index([scheduledFor])
+  @@index([sent])
+}
