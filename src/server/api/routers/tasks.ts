@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
 import { whatsappBridge } from "~/server/services/whatsapp-bridge";
+import { llmService } from "~/server/services/llm-service";
 import { tasks, assignedUsers } from "~/server/db/schema";
 import { eq, and, or, lt, notInArray, asc, desc } from "drizzle-orm";
 
@@ -15,9 +16,21 @@ const TaskStatusEnum = z.enum([
 
 const TaskPriorityEnum = z.enum(["LOW", "MEDIUM", "HIGH", "URGENT"]);
 
+/**
+ * Message option for task creation:
+ * - "default": Use built-in template (no LLM call)
+ * - "llm": Generate with AI
+ * - Any other string: Use as custom message
+ */
+const MessageOptionSchema = z.string().default("default");
+
 export const tasksRouter = createTRPCRouter({
   /**
    * Create a new task
+   * @param messageOption - How to generate the WhatsApp message:
+   *   - "default": Use built-in template (fastest)
+   *   - "llm": Generate with AI (requires OPENAI_API_KEY)
+   *   - Any other string: Use as custom message written by the user
    */
   create: publicProcedure
     .input(
@@ -30,6 +43,7 @@ export const tasksRouter = createTRPCRouter({
         assignedUserId: z.string(),
         dueDate: z.date().optional(),
         priority: TaskPriorityEnum.optional(),
+        messageOption: MessageOptionSchema.optional(),
       }),
     )
     .mutation(async ({ input }) => {
@@ -42,6 +56,7 @@ export const tasksRouter = createTRPCRouter({
         assignedUserId: input.assignedUserId,
         dueDate: input.dueDate,
         priority: input.priority,
+        messageOption: input.messageOption,
       });
 
       return task;
@@ -353,4 +368,46 @@ export const tasksRouter = createTRPCRouter({
 
       return stats;
     }),
+
+  /**
+   * Generate a preview of the task message without creating the task
+   * Use this to show users what message will be sent before they confirm
+   */
+  generateMessagePreview: publicProcedure
+    .input(
+      z.object({
+        projectId: z.string(),
+        title: z.string().min(1).max(200),
+        description: z.string().optional(),
+        assignedUserId: z.string(),
+        dueDate: z.date().optional(),
+        priority: TaskPriorityEnum.optional(),
+        messageOption: MessageOptionSchema.optional(),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      const preview = await whatsappBridge.generateTaskMessagePreview({
+        projectId: input.projectId,
+        title: input.title,
+        description: input.description,
+        assignedUserId: input.assignedUserId,
+        dueDate: input.dueDate,
+        priority: input.priority,
+        messageOption: input.messageOption ?? "llm",
+      });
+
+      return preview;
+    }),
+
+  /**
+   * Check if LLM service is available for message generation
+   */
+  llmStatus: publicProcedure.query(() => {
+    return {
+      available: llmService.isAvailable(),
+      message: llmService.isAvailable()
+        ? "LLM is configured and ready to generate messages"
+        : "LLM is not available. Set OPENAI_API_KEY to enable AI-generated messages.",
+    };
+  }),
 });

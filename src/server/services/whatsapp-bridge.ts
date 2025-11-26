@@ -1,4 +1,5 @@
 import { matrixClient } from "./matrix-client";
+import { llmService } from "./llm-service";
 import { db } from "../db";
 import {
   conversations,
@@ -7,6 +8,7 @@ import {
   taskUpdates,
   assignedUsers,
   managers,
+  projects,
   reminders,
   type taskStatusEnum,
   type taskPriorityEnum,
@@ -17,6 +19,14 @@ import { eq, and, or, desc, inArray } from "drizzle-orm";
 type TaskStatus = typeof taskStatusEnum.enumValues[number];
 type TaskPriority = typeof taskPriorityEnum.enumValues[number];
 type ConversationType = typeof conversationTypeEnum.enumValues[number];
+
+/**
+ * Message options for task creation
+ * - "default": Use the built-in template (fastest, no API call)
+ * - "llm": Generate message using LLM (requires OPENAI_API_KEY)
+ * - custom string: Use the provided message as-is
+ */
+export type TaskMessageOption = "default" | "llm" | string;
 
 /**
  * WhatsApp Bridge Service
@@ -88,6 +98,10 @@ export class WhatsAppBridgeService {
 
   /**
    * Create and assign a task in a conversation
+   * @param params.messageOption - How to generate the WhatsApp message:
+   *   - "default": Use built-in template
+   *   - "llm": Generate with AI (requires OPENAI_API_KEY)
+   *   - Any other string: Use as custom message
    */
   async createTask(params: {
     projectId: string;
@@ -98,6 +112,7 @@ export class WhatsAppBridgeService {
     assignedUserId: string;
     dueDate?: Date;
     priority?: TaskPriority;
+    messageOption?: TaskMessageOption;
   }) {
     const {
       projectId,
@@ -108,6 +123,7 @@ export class WhatsAppBridgeService {
       assignedUserId,
       dueDate,
       priority = "MEDIUM",
+      messageOption = "default",
     } = params;
 
     // Get conversation
@@ -132,6 +148,33 @@ export class WhatsAppBridgeService {
       throw new Error("Assigned user not found");
     }
 
+    // Get project name for LLM context
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+
+    // Determine the message to send
+    let customMessage: string | undefined;
+
+    if (messageOption === "llm") {
+      // Generate message using LLM
+      const generated = await llmService.generateTaskMessage({
+        title,
+        description,
+        assigneeName: assignedUser.name,
+        dueDate,
+        priority,
+        projectName: project?.name,
+      });
+      customMessage = generated.message;
+    } else if (messageOption !== "default") {
+      // Use the provided custom message
+      customMessage = messageOption;
+    }
+    // If messageOption === "default", customMessage stays undefined and default template is used
+
     // Create task in database
     const [task] = await db
       .insert(tasks)
@@ -155,6 +198,7 @@ export class WhatsAppBridgeService {
         title,
         description ?? "",
         assignedUser.name,
+        customMessage,
       );
 
       // Update task with Matrix event ID
@@ -165,6 +209,68 @@ export class WhatsAppBridgeService {
     }
 
     return task;
+  }
+
+  /**
+   * Generate a preview of the task message without creating the task
+   * Useful for letting users see what message will be sent before confirming
+   */
+  async generateTaskMessagePreview(params: {
+    projectId: string;
+    title: string;
+    description?: string;
+    assignedUserId: string;
+    dueDate?: Date;
+    priority?: TaskPriority;
+    messageOption?: TaskMessageOption;
+  }): Promise<{ message: string; wasGenerated: boolean }> {
+    const {
+      projectId,
+      title,
+      description,
+      assignedUserId,
+      dueDate,
+      priority,
+      messageOption = "llm",
+    } = params;
+
+    // Get assigned user
+    const [assignedUser] = await db
+      .select()
+      .from(assignedUsers)
+      .where(eq(assignedUsers.id, assignedUserId))
+      .limit(1);
+
+    // Get project name
+    const [project] = await db
+      .select()
+      .from(projects)
+      .where(eq(projects.id, projectId))
+      .limit(1);
+
+    if (messageOption === "default") {
+      // Return the default template
+      const message = assignedUser?.name
+        ? `📋 New Task: ${title}\n\n${description ?? ""}\n\n👤 Assigned to: ${assignedUser.name}\n\nReply to this message with updates or attach photos/videos of your progress!`
+        : `📋 New Task: ${title}\n\n${description ?? ""}\n\nReply to this message with updates or attach photos/videos of your progress!`;
+
+      return { message, wasGenerated: false };
+    }
+
+    if (messageOption === "llm") {
+      // Generate using LLM
+      return llmService.generateTaskMessage({
+        title,
+        description,
+        assigneeName: assignedUser?.name,
+        dueDate,
+        priority,
+        projectName: project?.name,
+      });
+    }
+
+    // Custom message provided
+    return { message: messageOption, wasGenerated: false };
   }
 
   /**

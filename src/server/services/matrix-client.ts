@@ -129,16 +129,21 @@ class MatrixClientService {
    * @param taskTitle - Task title
    * @param taskDescription - Task description
    * @param assignee - Username of assignee
+   * @param customMessage - Optional custom message to send instead of the default template
    */
   async sendTaskAssignment(
     roomId: string,
     taskTitle: string,
     taskDescription: string,
     assignee?: string,
+    customMessage?: string,
   ): Promise<string> {
-    const message = assignee
-      ? `📋 New Task: ${taskTitle}\n\n${taskDescription}\n\n👤 Assigned to: ${assignee}\n\nReply to this message with updates or attach photos/videos of your progress!`
-      : `📋 New Task: ${taskTitle}\n\n${taskDescription}\n\nReply to this message with updates or attach photos/videos of your progress!`;
+    // Use custom message if provided, otherwise use default template
+    const message = customMessage
+      ? customMessage
+      : assignee
+        ? `📋 New Task: ${taskTitle}\n\n${taskDescription}\n\n👤 Assigned to: ${assignee}\n\nReply to this message with updates or attach photos/videos of your progress!`
+        : `📋 New Task: ${taskTitle}\n\n${taskDescription}\n\nReply to this message with updates or attach photos/videos of your progress!`;
 
     return this.sendMessage(roomId, message);
   }
