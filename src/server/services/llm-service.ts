@@ -1,8 +1,10 @@
+import { generateText } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
 import { env } from "~/env";
 
 /**
  * LLM Service for generating task-related messages
- * Uses OpenAI API to create engaging, context-aware messages for WhatsApp groups
+ * Uses Vercel AI SDK with OpenAI to create engaging, context-aware messages for WhatsApp groups
  */
 
 interface TaskContext {
@@ -19,19 +21,53 @@ interface GeneratedMessage {
   wasGenerated: boolean;
 }
 
+const SYSTEM_PROMPT = `You are a helpful assistant that generates clear, friendly WhatsApp messages for task management in a work environment.
+
+Guidelines:
+- Keep messages concise but informative (suitable for WhatsApp)
+- Use appropriate emojis to make messages visually appealing
+- Be professional but friendly
+- Include key task details naturally
+- End with a clear call to action when appropriate
+- Messages should feel personal, not robotic
+- Do not use markdown formatting (no asterisks for bold, etc.)
+- Keep messages under 500 characters when possible`;
+
 class LLMService {
-  private apiKey: string | undefined;
-  private baseUrl = "https://api.openai.com/v1";
+  private openai: ReturnType<typeof createOpenAI> | null = null;
 
   constructor() {
-    this.apiKey = env.OPENAI_API_KEY;
+    if (env.OPENAI_API_KEY) {
+      this.openai = createOpenAI({
+        apiKey: env.OPENAI_API_KEY,
+      });
+    }
   }
 
   /**
    * Check if LLM service is available (API key configured)
    */
   isAvailable(): boolean {
-    return !!this.apiKey;
+    return this.openai !== null;
+  }
+
+  /**
+   * Generate text using the AI SDK
+   */
+  private async generate(prompt: string): Promise<string> {
+    if (!this.openai) {
+      throw new Error("OpenAI not configured");
+    }
+
+    const { text } = await generateText({
+      model: this.openai("gpt-4o-mini"),
+      system: SYSTEM_PROMPT,
+      prompt,
+      temperature: 0.7,
+      maxOutputTokens: 300,
+    });
+
+    return text.trim();
   }
 
   /**
@@ -39,7 +75,6 @@ class LLMService {
    */
   async generateTaskMessage(context: TaskContext): Promise<GeneratedMessage> {
     if (!this.isAvailable()) {
-      // Fall back to default template if no API key
       return {
         message: this.getDefaultTaskMessage(context),
         wasGenerated: false,
@@ -48,10 +83,10 @@ class LLMService {
 
     try {
       const prompt = this.buildTaskMessagePrompt(context);
-      const response = await this.callOpenAI(prompt);
+      const message = await this.generate(prompt);
 
       return {
-        message: response,
+        message,
         wasGenerated: true,
       };
     } catch (error) {
@@ -78,10 +113,10 @@ class LLMService {
 
     try {
       const prompt = this.buildReminderPrompt(context);
-      const response = await this.callOpenAI(prompt);
+      const message = await this.generate(prompt);
 
       return {
-        message: response,
+        message,
         wasGenerated: true,
       };
     } catch (error) {
@@ -108,10 +143,10 @@ class LLMService {
 
     try {
       const prompt = this.buildStatusUpdatePrompt(context);
-      const response = await this.callOpenAI(prompt);
+      const message = await this.generate(prompt);
 
       return {
-        message: response,
+        message,
         wasGenerated: true,
       };
     } catch (error) {
@@ -121,59 +156,6 @@ class LLMService {
         wasGenerated: false,
       };
     }
-  }
-
-  /**
-   * Call OpenAI API
-   */
-  private async callOpenAI(prompt: string): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a helpful assistant that generates clear, friendly WhatsApp messages for task management in a work environment.
-
-Guidelines:
-- Keep messages concise but informative (suitable for WhatsApp)
-- Use appropriate emojis to make messages visually appealing
-- Be professional but friendly
-- Include key task details naturally
-- End with a clear call to action when appropriate
-- Messages should feel personal, not robotic
-- Do not use markdown formatting (no asterisks for bold, etc.)
-- Keep messages under 500 characters when possible`,
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: 0.7,
-        max_tokens: 300,
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`OpenAI API error: ${response.status} - ${error}`);
-    }
-
-    const data = await response.json() as {
-      choices: Array<{
-        message: {
-          content: string;
-        };
-      }>;
-    };
-
-    return data.choices[0]?.message?.content?.trim() ?? "";
   }
 
   /**
