@@ -68,6 +68,8 @@ export const managers = pgTable(
     email: text("email").notNull().unique(),
     name: text("name"),
     phoneNumber: text("phone_number"),
+    // Matrix/Beeper user ID for WhatsApp bridge integration
+    matrixUserId: text("matrix_user_id").unique(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -76,6 +78,7 @@ export const managers = pgTable(
   },
   (table) => ({
     clerkIdIdx: index("managers_clerk_id_idx").on(table.clerkId),
+    matrixUserIdIdx: index("managers_matrix_user_id_idx").on(table.matrixUserId),
   }),
 );
 
@@ -121,6 +124,8 @@ export const assignedUsers = pgTable(
       .references(() => managers.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     phoneNumber: text("phone_number").notNull(),
+    // Matrix/Beeper user ID if they get invited to Matrix
+    matrixUserId: text("matrix_user_id").unique(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -130,6 +135,7 @@ export const assignedUsers = pgTable(
   (table) => ({
     projectIdIdx: index("assigned_users_project_id_idx").on(table.projectId),
     managerIdIdx: index("assigned_users_manager_id_idx").on(table.managerId),
+    matrixUserIdIdx: index("assigned_users_matrix_user_id_idx").on(table.matrixUserId),
     // Unique constraint: each phone number is unique per project
     projectPhoneIdx: uniqueIndex("assigned_users_project_phone_idx").on(
       table.projectId,
@@ -150,6 +156,8 @@ export const conversations = pgTable(
     whatsappConversationId: text("whatsapp_conversation_id")
       .notNull()
       .unique(),
+    // Matrix room ID for Beeper bridge integration
+    matrixRoomId: text("matrix_room_id").unique(),
     name: text("name"),
     type: conversationTypeEnum("type").notNull().default("PERSONAL"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -161,6 +169,9 @@ export const conversations = pgTable(
   (table) => ({
     whatsappIdIdx: index("conversations_whatsapp_id_idx").on(
       table.whatsappConversationId,
+    ),
+    matrixRoomIdIdx: index("conversations_matrix_room_id_idx").on(
+      table.matrixRoomId,
     ),
   }),
 );
@@ -226,6 +237,8 @@ export const tasks = pgTable(
     priority: taskPriorityEnum("priority").notNull().default("MEDIUM"),
     dueDate: timestamp("due_date"),
     whatsappMessageId: text("whatsapp_message_id").unique(),
+    // Matrix event ID for the task assignment message
+    matrixEventId: text("matrix_event_id").unique(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -246,6 +259,9 @@ export const tasks = pgTable(
     whatsappMessageIdIdx: index("tasks_whatsapp_message_id_idx").on(
       table.whatsappMessageId,
     ),
+    matrixEventIdIdx: index("tasks_matrix_event_id_idx").on(
+      table.matrixEventId,
+    ),
   }),
 );
 
@@ -265,6 +281,8 @@ export const taskUpdates = pgTable(
       .notNull()
       .references(() => assignedUsers.id, { onDelete: "cascade" }),
     whatsappMessageId: text("whatsapp_message_id").notNull().unique(),
+    // Matrix event ID for the update message
+    matrixEventId: text("matrix_event_id").unique(),
     messageText: text("message_text"),
     messageType: messageTypeEnum("message_type").notNull().default("TEXT"),
     analyzedByAI: boolean("analyzed_by_ai").notNull().default(false),
@@ -285,6 +303,9 @@ export const taskUpdates = pgTable(
     createdAtIdx: index("task_updates_created_at_idx").on(table.createdAt),
     whatsappMessageIdIdx: index("task_updates_whatsapp_message_id_idx").on(
       table.whatsappMessageId,
+    ),
+    matrixEventIdIdx: index("task_updates_matrix_event_id_idx").on(
+      table.matrixEventId,
     ),
   }),
 );
@@ -310,6 +331,8 @@ export const taskAttachments = pgTable(
     storageUrl: text("storage_url").notNull(),
     mimeType: text("mime_type"),
     whatsappMediaId: text("whatsapp_media_id"),
+    // Matrix MXC URL for media stored in Matrix
+    matrixMxcUrl: text("matrix_mxc_url"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => ({
