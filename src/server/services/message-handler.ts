@@ -1,6 +1,19 @@
 import { matrixClient } from "./matrix-client";
 import { db } from "../db";
 import type { MatrixEvent, Room } from "matrix-js-sdk";
+import {
+  conversations,
+  tasks,
+  taskUpdates,
+  taskAttachments,
+  assignedUsers,
+  type messageTypeEnum,
+  type taskStatusEnum,
+} from "../db/schema";
+import { eq, and, or, desc } from "drizzle-orm";
+
+type MessageType = typeof messageTypeEnum.enumValues[number];
+type TaskStatus = typeof taskStatusEnum.enumValues[number];
 
 /**
  * Message Handler Service
@@ -35,42 +48,45 @@ export class MessageHandlerService {
   /**
    * Handle an incoming message
    */
-  private async handleMessage(event: MatrixEvent, room: Room, senderId: string) {
+  private async handleMessage(
+    event: MatrixEvent,
+    room: Room,
+    senderId: string,
+  ) {
     const content = event.getContent();
     const messageBody = content.body as string;
     const matrixEventId = event.getId()!;
 
-    // Get or create group in database
-    const group = await db.group.findUnique({
-      where: { matrixRoomId: room.roomId },
-    });
+    // Get conversation by Matrix room ID
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.matrixRoomId, room.roomId))
+      .limit(1);
 
-    if (!group) {
-      // This room is not tracked in our database, ignore
+    if (!conversation) {
       console.log(`Ignoring message from untracked room: ${room.roomId}`);
       return;
     }
 
-    // Get or create sender user
-    let sender = await db.user.findUnique({
-      where: { matrixUserId: senderId },
-    });
+    // Get sender from assigned users (only track messages from workers, not managers)
+    const [assignedUser] = await db
+      .select()
+      .from(assignedUsers)
+      .where(eq(assignedUsers.matrixUserId, senderId))
+      .limit(1);
 
-    if (!sender) {
-      sender = await db.user.create({
-        data: {
-          matrixUserId: senderId,
-          displayName: senderId.split(":")[0]?.replace("@", "") ?? senderId,
-        },
-      });
+    if (!assignedUser) {
+      console.log(`Ignoring message from non-assigned user: ${senderId}`);
+      return;
     }
 
     // Check if message already exists (prevent duplicates)
-    const existingMessage = await db.message.findUnique({
-      where: { matrixEventId },
+    const existingUpdate = await db.query.taskUpdates.findFirst({
+      where: eq(taskUpdates.matrixEventId, matrixEventId),
     });
 
-    if (existingMessage) {
+    if (existingUpdate) {
       console.log(`Message already processed: ${matrixEventId}`);
       return;
     }
@@ -79,34 +95,37 @@ export class MessageHandlerService {
     const messageType = this.getMessageType(content);
 
     // Check if this is a reply to a task assignment
-    const replyTo = content["m.relates_to"]?.["m.in_reply_to"]?.event_id as string | undefined;
+    const replyTo = content["m.relates_to"]?.["m.in_reply_to"]
+      ?.event_id as string | undefined;
     let taskId: string | undefined;
 
     if (replyTo) {
       // Find task by its Matrix event ID
-      const task = await db.task.findFirst({
-        where: { matrixEventId: replyTo },
-      });
+      const [task] = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.matrixEventId, replyTo))
+        .limit(1);
 
       if (task) {
         taskId = task.id;
       }
     }
 
-    // If no task found via reply, try to find task by context
+    // If no task found via reply, find the most recent pending task for this user in this conversation
     if (!taskId) {
-      // Find any pending/in-progress tasks assigned to this user in this group
-      const userTasks = await db.task.findMany({
-        where: {
-          groupId: group.id,
-          assigneeId: sender.id,
-          status: {
-            in: ["PENDING", "IN_PROGRESS"],
-          },
-        },
-        orderBy: { createdAt: "desc" },
-        take: 1,
-      });
+      const userTasks = await db
+        .select()
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.conversationId, conversation.id),
+            eq(tasks.assignedUserId, assignedUser.id),
+            or(eq(tasks.status, "TODO"), eq(tasks.status, "IN_PROGRESS")),
+          ),
+        )
+        .orderBy(desc(tasks.createdAt))
+        .limit(1);
 
       if (userTasks.length > 0) {
         taskId = userTasks[0]!.id;
@@ -116,36 +135,40 @@ export class MessageHandlerService {
     // Analyze message content with AI
     const aiAnalysis = await this.analyzeMessageWithAI(messageBody, taskId);
 
-    // Save message to database
-    const message = await db.message.create({
-      data: {
-        content: messageBody,
-        messageType,
-        groupId: group.id,
-        senderId: sender.id,
-        taskId,
+    // Save task update to database
+    const [taskUpdate] = await db
+      .insert(taskUpdates)
+      .values({
+        taskId: taskId!,
+        assignedUserId: assignedUser.id,
+        whatsappMessageId: matrixEventId,
         matrixEventId,
+        messageText: messageBody,
+        messageType,
+        analyzedByAI: true,
         aiAnalysis,
-      },
-    });
+      })
+      .returning();
 
     // Handle attachments if present
-    if (messageType !== "TEXT") {
-      await this.handleAttachment(event, message.id, taskId);
+    if (messageType !== "TEXT" && taskUpdate) {
+      await this.handleAttachment(event, taskUpdate.id, taskId);
     }
 
     // Update task status based on AI analysis
-    if (taskId && aiAnalysis) {
-      await this.updateTaskBasedOnAnalysis(taskId, aiAnalysis as any);
+    if (taskId && aiAnalysis && aiAnalysis.status) {
+      await this.updateTaskBasedOnAnalysis(taskId, aiAnalysis);
     }
 
-    console.log(`Processed message: ${matrixEventId} for task: ${taskId ?? "none"}`);
+    console.log(
+      `Processed message: ${matrixEventId} for task: ${taskId ?? "none"}`,
+    );
   }
 
   /**
    * Determine message type from content
    */
-  private getMessageType(content: any): "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" | "AUDIO" {
+  private getMessageType(content: any): MessageType {
     const msgtype = content.msgtype as string;
 
     if (msgtype === "m.image") return "IMAGE";
@@ -158,16 +181,16 @@ export class MessageHandlerService {
 
   /**
    * Analyze message content using AI to determine intent and task status
-   * In a real implementation, this would call an LLM API (OpenAI, Anthropic, etc.)
    */
   private async analyzeMessageWithAI(
     messageBody: string,
     taskId?: string,
   ): Promise<{
-    intent: "task_update" | "task_complete" | "question" | "general";
-    suggestedStatus?: "IN_PROGRESS" | "COMPLETED" | "BLOCKED";
-    confidence: number;
-    summary: string;
+    status?: TaskStatus;
+    sentiment?: "positive" | "neutral" | "negative";
+    progress?: number;
+    summary?: string;
+    keywords?: string[];
   }> {
     // Simple keyword-based analysis (replace with actual LLM API call)
     const lowerMessage = messageBody.toLowerCase();
@@ -198,45 +221,45 @@ export class MessageHandlerService {
       "cannot",
       "problem",
       "issue",
-      "help",
     ];
-    const hasBlockedKeyword = blockedKeywords.some((kw) => lowerMessage.includes(kw));
+    const hasBlockedKeyword = blockedKeywords.some((kw) =>
+      lowerMessage.includes(kw),
+    );
 
-    // Check for questions
-    const hasQuestionMark = messageBody.includes("?");
-    const questionWords = ["what", "when", "where", "who", "why", "how"];
-    const hasQuestionWord = questionWords.some((qw) => lowerMessage.startsWith(qw));
+    // Check for feedback needed
+    const feedbackKeywords = ["help", "question", "?", "how", "what"];
+    const needsFeedback = feedbackKeywords.some((kw) =>
+      lowerMessage.includes(kw),
+    );
 
-    // Determine intent and status
-    let intent: "task_update" | "task_complete" | "question" | "general" = "general";
-    let suggestedStatus: "IN_PROGRESS" | "COMPLETED" | "BLOCKED" | undefined;
+    // Determine status
+    let status: TaskStatus | undefined;
     let confidence = 0.5;
 
     if (hasCompletionKeyword && taskId) {
-      intent = "task_complete";
-      suggestedStatus = "COMPLETED";
+      status = "DONE";
       confidence = 0.9;
     } else if (hasBlockedKeyword && taskId) {
-      intent = "task_update";
-      suggestedStatus = "BLOCKED";
+      status = "BLOCKED";
       confidence = 0.85;
-    } else if (hasProgressKeyword && taskId) {
-      intent = "task_update";
-      suggestedStatus = "IN_PROGRESS";
+    } else if (needsFeedback && taskId) {
+      status = "FEEDBACK_NEEDED";
       confidence = 0.8;
-    } else if (hasQuestionMark || hasQuestionWord) {
-      intent = "question";
-      confidence = 0.7;
-    } else if (taskId) {
-      intent = "task_update";
-      confidence = 0.6;
+    } else if (hasProgressKeyword && taskId) {
+      status = "IN_PROGRESS";
+      confidence = 0.75;
     }
 
     return {
-      intent,
-      suggestedStatus,
-      confidence,
+      status,
+      sentiment: hasCompletionKeyword ? "positive" : "neutral",
+      progress: hasCompletionKeyword ? 100 : hasProgressKeyword ? 50 : undefined,
       summary: messageBody.substring(0, 100),
+      keywords: [
+        ...completionKeywords.filter((k) => lowerMessage.includes(k)),
+        ...progressKeywords.filter((k) => lowerMessage.includes(k)),
+        ...blockedKeywords.filter((k) => lowerMessage.includes(k)),
+      ],
     };
   }
 
@@ -246,42 +269,41 @@ export class MessageHandlerService {
   private async updateTaskBasedOnAnalysis(
     taskId: string,
     analysis: {
-      intent: string;
-      suggestedStatus?: "IN_PROGRESS" | "COMPLETED" | "BLOCKED";
-      confidence: number;
+      status?: TaskStatus;
+      confidence?: number;
     },
   ) {
-    // Only auto-update if confidence is high enough
-    if (analysis.confidence < 0.7 || !analysis.suggestedStatus) {
+    // Only auto-update if status is provided
+    if (!analysis.status) {
       return;
     }
 
-    const task = await db.task.findUnique({
-      where: { id: taskId },
-      include: { group: true },
-    });
+    const [task] = await db
+      .select()
+      .from(tasks)
+      .where(eq(tasks.id, taskId))
+      .limit(1);
 
     if (!task) {
       return;
     }
 
     // Don't update if task is already in the suggested status
-    if (task.status === analysis.suggestedStatus) {
+    if (task.status === analysis.status) {
       return;
     }
 
     // Update task status
-    await db.task.update({
-      where: { id: taskId },
-      data: {
-        status: analysis.suggestedStatus,
-        completedAt:
-          analysis.suggestedStatus === "COMPLETED" ? new Date() : undefined,
-      },
-    });
+    await db
+      .update(tasks)
+      .set({
+        status: analysis.status,
+        completedAt: analysis.status === "DONE" ? new Date() : undefined,
+      })
+      .where(eq(tasks.id, taskId));
 
     console.log(
-      `Auto-updated task ${taskId} status to ${analysis.suggestedStatus} (confidence: ${analysis.confidence})`,
+      `Auto-updated task ${taskId} status to ${analysis.status}`,
     );
   }
 
@@ -290,29 +312,27 @@ export class MessageHandlerService {
    */
   private async handleAttachment(
     event: MatrixEvent,
-    messageId: string,
+    taskUpdateId: string,
     taskId?: string,
   ) {
     try {
       const media = await matrixClient.downloadMedia(event);
       const content = event.getContent();
 
-      // In a real implementation, you would save the file to disk or cloud storage
-      // For now, we'll just store the metadata and MXC URL
-
-      await db.attachment.create({
-        data: {
-          fileName: media.fileName,
-          mimeType: media.contentType,
-          fileSize: media.data.byteLength,
-          matrixMxcUrl: content.url,
-          messageId,
-          taskId,
-        },
+      // Save attachment metadata
+      await db.insert(taskAttachments).values({
+        taskUpdateId,
+        taskId: taskId!,
+        fileName: media.fileName,
+        fileType: content.msgtype || "m.file",
+        fileSize: media.data.byteLength,
+        storageUrl: content.url || "",
+        mimeType: media.contentType,
+        matrixMxcUrl: content.url,
       });
 
       console.log(
-        `Saved attachment: ${media.fileName} (${media.contentType}) for message ${messageId}`,
+        `Saved attachment: ${media.fileName} (${media.contentType}) for task update ${taskUpdateId}`,
       );
     } catch (error) {
       console.error("Error handling attachment:", error);
@@ -323,7 +343,6 @@ export class MessageHandlerService {
    * Stop listening for messages
    */
   stopListening() {
-    // Matrix client handles this internally
     this.isListening = false;
     console.log("Message handler stopped listening");
   }

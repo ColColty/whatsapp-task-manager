@@ -1,205 +1,249 @@
 import { matrixClient } from "./matrix-client";
 import { db } from "../db";
-import type { Task, TaskStatus, TaskPriority, User } from "@prisma/client";
+import {
+  conversations,
+  conversationMembers,
+  tasks,
+  taskUpdates,
+  assignedUsers,
+  managers,
+  reminders,
+  type taskStatusEnum,
+  type taskPriorityEnum,
+  type conversationTypeEnum,
+} from "../db/schema";
+import { eq, and, or, desc, inArray } from "drizzle-orm";
+
+type TaskStatus = typeof taskStatusEnum.enumValues[number];
+type TaskPriority = typeof taskPriorityEnum.enumValues[number];
+type ConversationType = typeof conversationTypeEnum.enumValues[number];
 
 /**
  * WhatsApp Bridge Service
  * High-level service that combines Matrix operations with database management
+ * Adapted to work with existing schema (managers, assigned users, projects, conversations)
  */
 export class WhatsAppBridgeService {
   /**
-   * Create a new WhatsApp group for task management
-   * @param name - Group name
-   * @param managerUserId - Matrix user ID of the manager creating the group
-   * @param memberUserIds - Array of Matrix user IDs to add to the group
-   * @returns Group database record
+   * Create a new WhatsApp conversation (group or personal) for task management
    */
-  async createTaskGroup(
+  async createTaskConversation(
     name: string,
-    managerUserId: string,
-    memberUserIds: string[],
-    description?: string,
+    managerId: string,
+    assignedUserIds: string[],
+    type: ConversationType = "GROUP",
   ) {
-    // Ensure manager user exists in database
-    await this.ensureUserExists(managerUserId);
+    // Get manager's Matrix user ID
+    const [manager] = await db
+      .select()
+      .from(managers)
+      .where(eq(managers.id, managerId))
+      .limit(1);
 
-    // Ensure all member users exist in database
-    for (const userId of memberUserIds) {
-      await this.ensureUserExists(userId);
+    if (!manager?.matrixUserId) {
+      throw new Error("Manager must have a Matrix user ID configured");
     }
 
+    // Get assigned users' Matrix user IDs
+    const assignedUsersData = await db
+      .select()
+      .from(assignedUsers)
+      .where(inArray(assignedUsers.id, assignedUserIds));
+
+    const matrixUserIds = assignedUsersData
+      .map((u) => u.matrixUserId)
+      .filter((id): id is string => id !== null);
+
     // Create Matrix room with all participants
-    const allParticipants = [...new Set([managerUserId, ...memberUserIds])];
+    const allParticipants = [manager.matrixUserId, ...matrixUserIds];
     const matrixRoomId = await matrixClient.createRoom(name, allParticipants);
 
     // Convert Matrix room to WhatsApp group using the bridge
     await matrixClient.createWhatsAppGroup(matrixRoomId);
 
-    // Save group to database
-    const group = await db.group.create({
-      data: {
+    // Save conversation to database
+    const [conversation] = await db
+      .insert(conversations)
+      .values({
+        whatsappConversationId: matrixRoomId,
         matrixRoomId,
         name,
-        description,
-      },
-    });
+        type,
+      })
+      .returning();
 
-    return group;
+    // Add conversation members
+    const memberInserts = [
+      { conversationId: conversation!.id, managerId },
+      ...assignedUserIds.map((userId) => ({
+        conversationId: conversation!.id,
+        assignedUserId: userId,
+      })),
+    ];
+
+    await db.insert(conversationMembers).values(memberInserts);
+
+    return conversation;
   }
 
   /**
-   * Create and assign a task in a group
-   * @param groupId - Database group ID
-   * @param title - Task title
-   * @param description - Task description
-   * @param createdByUserId - Matrix user ID of the creator
-   * @param assigneeUserId - Optional Matrix user ID of the assignee
-   * @param dueDate - Optional due date
-   * @param priority - Task priority
+   * Create and assign a task in a conversation
    */
   async createTask(params: {
-    groupId: string;
+    projectId: string;
+    conversationId: string;
     title: string;
     description?: string;
-    createdByUserId: string;
-    assigneeUserId?: string;
+    managerId: string;
+    assignedUserId: string;
     dueDate?: Date;
     priority?: TaskPriority;
   }) {
     const {
-      groupId,
+      projectId,
+      conversationId,
       title,
       description,
-      createdByUserId,
-      assigneeUserId,
+      managerId,
+      assignedUserId,
       dueDate,
       priority = "MEDIUM",
     } = params;
 
-    // Get group from database
-    const group = await db.group.findUnique({
-      where: { id: groupId },
-    });
+    // Get conversation
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
 
-    if (!group) {
-      throw new Error("Group not found");
+    if (!conversation) {
+      throw new Error("Conversation not found");
     }
 
-    // Ensure users exist
-    const createdBy = await this.ensureUserExists(createdByUserId);
-    let assignee: User | undefined;
-    if (assigneeUserId) {
-      assignee = await this.ensureUserExists(assigneeUserId);
+    // Get assigned user
+    const [assignedUser] = await db
+      .select()
+      .from(assignedUsers)
+      .where(eq(assignedUsers.id, assignedUserId))
+      .limit(1);
+
+    if (!assignedUser) {
+      throw new Error("Assigned user not found");
     }
 
     // Create task in database
-    const task = await db.task.create({
-      data: {
+    const [task] = await db
+      .insert(tasks)
+      .values({
+        projectId,
+        conversationId,
+        assignedUserId,
+        managerId,
         title,
         description,
-        groupId,
-        createdById: createdBy.id,
-        assigneeId: assignee?.id,
         dueDate,
         priority,
-        status: "PENDING",
-      },
-    });
+        status: "TODO",
+      })
+      .returning();
 
     // Send task assignment message to WhatsApp group
-    const matrixEventId = await matrixClient.sendTaskAssignment(
-      group.matrixRoomId,
-      title,
-      description ?? "",
-      assignee?.displayName ?? assignee?.matrixUserId,
-    );
+    if (conversation.matrixRoomId) {
+      const matrixEventId = await matrixClient.sendTaskAssignment(
+        conversation.matrixRoomId,
+        title,
+        description ?? "",
+        assignedUser.name,
+      );
 
-    // Update task with Matrix event ID
-    await db.task.update({
-      where: { id: task.id },
-      data: { matrixEventId },
-    });
+      // Update task with Matrix event ID
+      await db
+        .update(tasks)
+        .set({ matrixEventId })
+        .where(eq(tasks.id, task!.id));
+    }
 
     return task;
   }
 
   /**
    * Update task status
-   * @param taskId - Database task ID
-   * @param status - New status
    */
   async updateTaskStatus(taskId: string, status: TaskStatus) {
-    const task = await db.task.update({
-      where: { id: taskId },
-      data: {
+    const [task] = await db
+      .update(tasks)
+      .set({
         status,
-        completedAt: status === "COMPLETED" ? new Date() : undefined,
-      },
-      include: {
-        group: true,
-        assignee: true,
-      },
-    });
+        completedAt: status === "DONE" ? new Date() : undefined,
+      })
+      .where(eq(tasks.id, taskId))
+      .returning();
 
-    // Send status update to WhatsApp group
-    const statusEmoji = this.getStatusEmoji(status);
-    const message = `${statusEmoji} Task status updated: "${task.title}" is now ${status}`;
+    if (!task) {
+      throw new Error("Task not found");
+    }
 
-    await matrixClient.sendMessage(task.group.matrixRoomId, message);
+    // Get conversation for sending status update
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, task.conversationId))
+      .limit(1);
+
+    if (conversation?.matrixRoomId) {
+      const statusEmoji = this.getStatusEmoji(status);
+      const message = `${statusEmoji} Task status updated: "${task.title}" is now ${status}`;
+      await matrixClient.sendMessage(conversation.matrixRoomId, message);
+    }
 
     return task;
   }
 
   /**
-   * Get all tasks for a group
+   * Get all tasks for a conversation
    */
-  async getTasksForGroup(groupId: string) {
-    return db.task.findMany({
-      where: { groupId },
-      include: {
-        assignee: true,
-        createdBy: true,
-        messages: {
-          include: {
-            sender: true,
+  async getTasksForConversation(conversationId: string) {
+    return db.query.tasks.findMany({
+      where: eq(tasks.conversationId, conversationId),
+      with: {
+        assignedUser: true,
+        manager: true,
+        conversation: true,
+        updates: {
+          limit: 5,
+          orderBy: desc(taskUpdates.createdAt),
+          with: {
+            assignedUser: true,
             attachments: true,
           },
-          orderBy: { createdAt: "desc" },
-          take: 5,
         },
         attachments: true,
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: desc(tasks.createdAt),
     });
   }
 
   /**
    * Get all tasks assigned to a user
    */
-  async getTasksForUser(userId: string) {
-    const user = await db.user.findUnique({
-      where: { matrixUserId: userId },
-    });
-
-    if (!user) {
-      return [];
-    }
-
-    return db.task.findMany({
-      where: { assigneeId: user.id },
-      include: {
-        group: true,
-        createdBy: true,
-        messages: {
-          include: {
-            sender: true,
+  async getTasksForUser(assignedUserId: string) {
+    return db.query.tasks.findMany({
+      where: eq(tasks.assignedUserId, assignedUserId),
+      with: {
+        conversation: true,
+        manager: true,
+        project: true,
+        updates: {
+          limit: 5,
+          orderBy: desc(taskUpdates.createdAt),
+          with: {
+            assignedUser: true,
             attachments: true,
           },
-          orderBy: { createdAt: "desc" },
-          take: 5,
         },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: desc(tasks.createdAt),
     });
   }
 
@@ -207,86 +251,32 @@ export class WhatsAppBridgeService {
    * Send a reminder for a task
    */
   async sendTaskReminder(taskId: string) {
-    const task = await db.task.findUnique({
-      where: { id: taskId },
-      include: {
-        group: true,
-        assignee: true,
+    const [task] = await db.query.tasks.findMany({
+      where: eq(tasks.id, taskId),
+      with: {
+        assignedUser: true,
+        conversation: true,
       },
+      limit: 1,
     });
 
     if (!task) {
       throw new Error("Task not found");
     }
 
-    const assigneeName = task.assignee?.displayName ?? task.assignee?.matrixUserId ?? "someone";
-    const message = `⏰ Reminder: ${assigneeName}, don't forget about the task "${task.title}"!\n\nPlease provide an update when you can.`;
+    const message = `⏰ Reminder: ${task.assignedUser.name}, don't forget about the task "${task.title}"!\n\nPlease provide an update when you can.`;
 
-    await matrixClient.sendMessage(task.group.matrixRoomId, message);
+    if (task.conversation.matrixRoomId) {
+      await matrixClient.sendMessage(task.conversation.matrixRoomId, message);
+    }
 
     // Log reminder in database
-    await db.reminder.create({
-      data: {
-        taskId,
-        scheduledFor: new Date(),
-        sent: true,
-        sentAt: new Date(),
-      },
+    await db.insert(reminders).values({
+      taskId,
+      conversationId: task.conversationId,
+      frequency: "ONCE",
+      lastSentAt: new Date(),
     });
-  }
-
-  /**
-   * Send a message to a group
-   */
-  async sendMessageToGroup(groupId: string, content: string, senderId: string) {
-    const group = await db.group.findUnique({
-      where: { id: groupId },
-    });
-
-    if (!group) {
-      throw new Error("Group not found");
-    }
-
-    const sender = await this.ensureUserExists(senderId);
-
-    // Send message via Matrix
-    const matrixEventId = await matrixClient.sendMessage(
-      group.matrixRoomId,
-      content,
-    );
-
-    // Save message to database
-    const message = await db.message.create({
-      data: {
-        content,
-        groupId,
-        senderId: sender.id,
-        matrixEventId,
-        messageType: "TEXT",
-      },
-    });
-
-    return message;
-  }
-
-  /**
-   * Ensure a user exists in the database, create if not
-   */
-  private async ensureUserExists(matrixUserId: string) {
-    let user = await db.user.findUnique({
-      where: { matrixUserId },
-    });
-
-    if (!user) {
-      user = await db.user.create({
-        data: {
-          matrixUserId,
-          displayName: matrixUserId.split(":")[0]?.replace("@", "") ?? matrixUserId,
-        },
-      });
-    }
-
-    return user;
   }
 
   /**
@@ -294,69 +284,76 @@ export class WhatsAppBridgeService {
    */
   private getStatusEmoji(status: TaskStatus): string {
     const emojiMap: Record<TaskStatus, string> = {
-      PENDING: "⏳",
+      TODO: "⏳",
       IN_PROGRESS: "🔄",
-      COMPLETED: "✅",
+      DONE: "✅",
       BLOCKED: "🚫",
-      CANCELLED: "❌",
+      FEEDBACK_NEEDED: "💬",
     };
     return emojiMap[status] || "📋";
   }
 
   /**
-   * Get all groups for a user
+   * Get all conversations for a manager
    */
-  async getGroupsForUser(userId: string) {
-    // Get all rooms where the user is a member via Matrix
-    await matrixClient.initialize();
-    const client = matrixClient.getClient();
-    const rooms = client.getRooms();
-
-    // Filter rooms that exist in our database
-    const groups = await db.group.findMany({
-      where: {
-        matrixRoomId: {
-          in: rooms.map((r) => r.roomId),
-        },
-      },
-      include: {
-        tasks: {
-          where: {
-            status: {
-              in: ["PENDING", "IN_PROGRESS"],
+  async getConversationsForManager(managerId: string) {
+    const managerConversations = await db.query.conversationMembers.findMany({
+      where: eq(conversationMembers.managerId, managerId),
+      with: {
+        conversation: {
+          with: {
+            tasks: {
+              where: or(
+                eq(tasks.status, "TODO"),
+                eq(tasks.status, "IN_PROGRESS"),
+              ),
+              limit: 5,
             },
-          },
-          take: 5,
-        },
-        _count: {
-          select: {
-            tasks: true,
-            messages: true,
           },
         },
       },
     });
 
-    return groups;
+    return managerConversations.map((mc) => mc.conversation);
   }
 
   /**
-   * Add a participant to a group
+   * Add a participant to a conversation
    */
-  async addParticipant(groupId: string, matrixUserId: string) {
-    const group = await db.group.findUnique({
-      where: { id: groupId },
-    });
+  async addParticipant(conversationId: string, assignedUserId: string) {
+    const [conversation] = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, conversationId))
+      .limit(1);
 
-    if (!group) {
-      throw new Error("Group not found");
+    if (!conversation) {
+      throw new Error("Conversation not found");
     }
 
-    // Ensure user exists in database
-    await this.ensureUserExists(matrixUserId);
+    const [assignedUser] = await db
+      .select()
+      .from(assignedUsers)
+      .where(eq(assignedUsers.id, assignedUserId))
+      .limit(1);
+
+    if (!assignedUser?.matrixUserId) {
+      throw new Error("Assigned user must have a Matrix user ID");
+    }
+
+    // Add to conversation members
+    await db.insert(conversationMembers).values({
+      conversationId,
+      assignedUserId,
+    });
 
     // Invite user to Matrix room (which will sync to WhatsApp)
-    await matrixClient.inviteUser(group.matrixRoomId, matrixUserId);
+    if (conversation.matrixRoomId) {
+      await matrixClient.inviteUser(
+        conversation.matrixRoomId,
+        assignedUser.matrixUserId,
+      );
+    }
 
     return true;
   }
