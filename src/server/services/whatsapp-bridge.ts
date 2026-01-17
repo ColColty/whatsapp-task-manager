@@ -1,4 +1,4 @@
-import { matrixClient } from "./matrix-client";
+import { baileysClient } from "./baileys-client";
 import { db } from "../db";
 import {
   conversations,
@@ -20,7 +20,7 @@ type ConversationType = typeof conversationTypeEnum.enumValues[number];
 
 /**
  * WhatsApp Bridge Service
- * High-level service that combines Matrix operations with database management
+ * High-level service that combines Baileys WhatsApp operations with database management
  * Adapted to work with existing schema (managers, assigned users, projects, conversations)
  */
 export class WhatsAppBridgeService {
@@ -33,40 +33,40 @@ export class WhatsAppBridgeService {
     assignedUserIds: string[],
     type: ConversationType = "GROUP",
   ) {
-    // Get manager's Matrix user ID
+    // Get manager's phone number
     const [manager] = await db
       .select()
       .from(managers)
       .where(eq(managers.id, managerId))
       .limit(1);
 
-    if (!manager?.matrixUserId) {
-      throw new Error("Manager must have a Matrix user ID configured");
+    if (!manager?.phoneNumber) {
+      throw new Error("Manager must have a phone number configured");
     }
 
-    // Get assigned users' Matrix user IDs
+    // Get assigned users' phone numbers
     const assignedUsersData = await db
       .select()
       .from(assignedUsers)
       .where(inArray(assignedUsers.id, assignedUserIds));
 
-    const matrixUserIds = assignedUsersData
-      .map((u) => u.matrixUserId)
-      .filter((id): id is string => id !== null);
+    const phoneNumbers = assignedUsersData
+      .map((u) => u.phoneNumber)
+      .filter((phone): phone is string => phone !== null);
 
-    // Create Matrix room with all participants
-    const allParticipants = [manager.matrixUserId, ...matrixUserIds];
-    const matrixRoomId = await matrixClient.createRoom(name, allParticipants);
-
-    // Convert Matrix room to WhatsApp group using the bridge
-    await matrixClient.createWhatsAppGroup(matrixRoomId);
+    // Create WhatsApp group with all participants
+    const allParticipants = [...phoneNumbers]; // Manager is already the creator
+    const whatsappGroupJid = await baileysClient.createGroup(
+      name,
+      allParticipants,
+    );
 
     // Save conversation to database
     const [conversation] = await db
       .insert(conversations)
       .values({
-        whatsappConversationId: matrixRoomId,
-        matrixRoomId,
+        whatsappConversationId: whatsappGroupJid,
+        matrixRoomId: whatsappGroupJid, // Store the group JID in this field
         name,
         type,
       })
@@ -150,17 +150,17 @@ export class WhatsAppBridgeService {
 
     // Send task assignment message to WhatsApp group
     if (conversation.matrixRoomId) {
-      const matrixEventId = await matrixClient.sendTaskAssignment(
-        conversation.matrixRoomId,
+      const whatsappMessageId = await baileysClient.sendTaskAssignment(
+        conversation.matrixRoomId, // This is the WhatsApp group JID
         title,
         description ?? "",
         assignedUser.name,
       );
 
-      // Update task with Matrix event ID
+      // Update task with WhatsApp message ID
       await db
         .update(tasks)
-        .set({ matrixEventId })
+        .set({ matrixEventId: whatsappMessageId })
         .where(eq(tasks.id, task!.id));
     }
 
@@ -194,7 +194,7 @@ export class WhatsAppBridgeService {
     if (conversation?.matrixRoomId) {
       const statusEmoji = this.getStatusEmoji(status);
       const message = `${statusEmoji} Task status updated: "${task.title}" is now ${status}`;
-      await matrixClient.sendMessage(conversation.matrixRoomId, message);
+      await baileysClient.sendMessage(conversation.matrixRoomId, message);
     }
 
     return task;
@@ -267,7 +267,7 @@ export class WhatsAppBridgeService {
     const message = `⏰ Reminder: ${task.assignedUser.name}, don't forget about the task "${task.title}"!\n\nPlease provide an update when you can.`;
 
     if (task.conversation.matrixRoomId) {
-      await matrixClient.sendMessage(task.conversation.matrixRoomId, message);
+      await baileysClient.sendMessage(task.conversation.matrixRoomId, message);
     }
 
     // Log reminder in database
@@ -337,8 +337,8 @@ export class WhatsAppBridgeService {
       .where(eq(assignedUsers.id, assignedUserId))
       .limit(1);
 
-    if (!assignedUser?.matrixUserId) {
-      throw new Error("Assigned user must have a Matrix user ID");
+    if (!assignedUser?.phoneNumber) {
+      throw new Error("Assigned user must have a phone number");
     }
 
     // Add to conversation members
@@ -347,11 +347,11 @@ export class WhatsAppBridgeService {
       assignedUserId,
     });
 
-    // Invite user to Matrix room (which will sync to WhatsApp)
+    // Add participant to WhatsApp group
     if (conversation.matrixRoomId) {
-      await matrixClient.inviteUser(
-        conversation.matrixRoomId,
-        assignedUser.matrixUserId,
+      await baileysClient.addParticipant(
+        conversation.matrixRoomId, // This is the WhatsApp group JID
+        assignedUser.phoneNumber,
       );
     }
 

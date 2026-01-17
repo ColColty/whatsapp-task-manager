@@ -1,6 +1,6 @@
-import { matrixClient } from "./matrix-client";
+import { baileysClient } from "./baileys-client";
 import { db } from "../db";
-import type { MatrixEvent, Room } from "matrix-js-sdk";
+import type { proto } from "@whiskeysockets/baileys";
 import {
   conversations,
   tasks,
@@ -17,7 +17,7 @@ type TaskStatus = typeof taskStatusEnum.enumValues[number];
 
 /**
  * Message Handler Service
- * Processes incoming WhatsApp messages from Matrix bridge
+ * Processes incoming WhatsApp messages from Baileys
  */
 export class MessageHandlerService {
   private isListening = false;
@@ -31,11 +31,11 @@ export class MessageHandlerService {
       return;
     }
 
-    await matrixClient.initialize();
+    await baileysClient.initialize();
 
-    matrixClient.onMessage(async (event, room, sender) => {
+    baileysClient.onMessage(async (message) => {
       try {
-        await this.handleMessage(event, room, sender);
+        await this.handleMessage(message);
       } catch (error) {
         console.error("Error handling message:", error);
       }
@@ -48,63 +48,82 @@ export class MessageHandlerService {
   /**
    * Handle an incoming message
    */
-  private async handleMessage(
-    event: MatrixEvent,
-    room: Room,
-    senderId: string,
-  ) {
-    const content = event.getContent();
-    const messageBody = content.body as string;
-    const matrixEventId = event.getId()!;
+  private async handleMessage(message: proto.IWebMessageInfo) {
+    const messageContent = message.message;
+    if (!messageContent) return;
 
-    // Get conversation by Matrix room ID
+    // Extract message details
+    if (!message.key) return;
+
+    const messageId = message.key.id;
+    const remoteJid = message.key.remoteJid; // Group or personal chat JID
+    const senderJid = message.key.participant || message.key.remoteJid; // Sender's JID
+
+    if (!messageId || !remoteJid || !senderJid) return;
+
+    // Get message text
+    const messageBody =
+      messageContent.conversation ||
+      messageContent.extendedTextMessage?.text ||
+      messageContent.imageMessage?.caption ||
+      messageContent.videoMessage?.caption ||
+      "";
+
+    if (!messageBody && !this.hasMedia(messageContent)) {
+      return; // Ignore messages without text or media
+    }
+
+    // Get conversation by WhatsApp JID
     const [conversation] = await db
       .select()
       .from(conversations)
-      .where(eq(conversations.matrixRoomId, room.roomId))
+      .where(eq(conversations.matrixRoomId, remoteJid)) // matrixRoomId stores WhatsApp JID
       .limit(1);
 
     if (!conversation) {
-      console.log(`Ignoring message from untracked room: ${room.roomId}`);
+      console.log(`Ignoring message from untracked conversation: ${remoteJid}`);
       return;
     }
+
+    // Get sender phone number from JID
+    const senderPhone = baileysClient.getPhoneFromJid(senderJid);
 
     // Get sender from assigned users (only track messages from workers, not managers)
     const [assignedUser] = await db
       .select()
       .from(assignedUsers)
-      .where(eq(assignedUsers.matrixUserId, senderId))
+      .where(eq(assignedUsers.phoneNumber, senderPhone))
       .limit(1);
 
     if (!assignedUser) {
-      console.log(`Ignoring message from non-assigned user: ${senderId}`);
+      console.log(`Ignoring message from non-assigned user: ${senderPhone}`);
       return;
     }
 
     // Check if message already exists (prevent duplicates)
     const existingUpdate = await db.query.taskUpdates.findFirst({
-      where: eq(taskUpdates.matrixEventId, matrixEventId),
+      where: eq(taskUpdates.matrixEventId, messageId), // matrixEventId stores WhatsApp message ID
     });
 
     if (existingUpdate) {
-      console.log(`Message already processed: ${matrixEventId}`);
+      console.log(`Message already processed: ${messageId}`);
       return;
     }
 
     // Determine message type
-    const messageType = this.getMessageType(content);
+    const messageType = this.getMessageType(messageContent);
 
-    // Check if this is a reply to a task assignment
-    const replyTo = content["m.relates_to"]?.["m.in_reply_to"]
-      ?.event_id as string | undefined;
+    // Check if this is a reply or quote
+    const quotedMessageId =
+      messageContent.extendedTextMessage?.contextInfo?.stanzaId;
     let taskId: string | undefined;
 
-    if (replyTo) {
-      // Find task by its Matrix event ID
+    if (quotedMessageId) {
+      // Find task by its WhatsApp message ID
       const [task] = await db
         .select()
         .from(tasks)
-        .where(eq(tasks.matrixEventId, replyTo))
+        .where(eq(tasks.matrixEventId, quotedMessageId)) // matrixEventId stores WhatsApp message ID
         .limit(1);
 
       if (task) {
@@ -132,6 +151,12 @@ export class MessageHandlerService {
       }
     }
 
+    // Skip if no task is associated
+    if (!taskId) {
+      console.log("No task found for message, skipping");
+      return;
+    }
+
     // Analyze message content with AI
     const aiAnalysis = await this.analyzeMessageWithAI(messageBody, taskId);
 
@@ -139,11 +164,11 @@ export class MessageHandlerService {
     const [taskUpdate] = await db
       .insert(taskUpdates)
       .values({
-        taskId: taskId!,
+        taskId: taskId,
         assignedUserId: assignedUser.id,
-        whatsappMessageId: matrixEventId,
-        matrixEventId,
-        messageText: messageBody,
+        whatsappMessageId: messageId,
+        matrixEventId: messageId, // Store WhatsApp message ID here
+        messageText: messageBody || "[Media]",
         messageType,
         analyzedByAI: true,
         aiAnalysis,
@@ -151,8 +176,8 @@ export class MessageHandlerService {
       .returning();
 
     // Handle attachments if present
-    if (messageType !== "TEXT" && taskUpdate) {
-      await this.handleAttachment(event, taskUpdate.id, taskId);
+    if (this.hasMedia(messageContent) && taskUpdate) {
+      await this.handleAttachment(message, taskUpdate.id, taskId);
     }
 
     // Update task status based on AI analysis
@@ -161,20 +186,30 @@ export class MessageHandlerService {
     }
 
     console.log(
-      `Processed message: ${matrixEventId} for task: ${taskId ?? "none"}`,
+      `Processed message: ${messageId} for task: ${taskId ?? "none"}`,
+    );
+  }
+
+  /**
+   * Check if message has media
+   */
+  private hasMedia(messageContent: proto.IMessage): boolean {
+    return !!(
+      messageContent.imageMessage ||
+      messageContent.videoMessage ||
+      messageContent.audioMessage ||
+      messageContent.documentMessage
     );
   }
 
   /**
    * Determine message type from content
    */
-  private getMessageType(content: any): MessageType {
-    const msgtype = content.msgtype as string;
-
-    if (msgtype === "m.image") return "IMAGE";
-    if (msgtype === "m.video") return "VIDEO";
-    if (msgtype === "m.audio") return "AUDIO";
-    if (msgtype === "m.file") return "DOCUMENT";
+  private getMessageType(messageContent: proto.IMessage): MessageType {
+    if (messageContent.imageMessage) return "IMAGE";
+    if (messageContent.videoMessage) return "VIDEO";
+    if (messageContent.audioMessage) return "AUDIO";
+    if (messageContent.documentMessage) return "DOCUMENT";
 
     return "TEXT";
   }
@@ -186,7 +221,7 @@ export class MessageHandlerService {
     messageBody: string,
     taskId?: string,
   ): Promise<{
-    status?: TaskStatus;
+    status?: "todo" | "in_progress" | "done" | "blocked" | "feedback_needed";
     sentiment?: "positive" | "neutral" | "negative";
     progress?: number;
     summary?: string;
@@ -196,7 +231,13 @@ export class MessageHandlerService {
     const lowerMessage = messageBody.toLowerCase();
 
     // Check for completion indicators
-    const completionKeywords = ["done", "finished", "completed", "complete", "ready"];
+    const completionKeywords = [
+      "done",
+      "finished",
+      "completed",
+      "complete",
+      "ready",
+    ];
     const hasCompletionKeyword = completionKeywords.some((kw) =>
       lowerMessage.includes(kw),
     );
@@ -232,21 +273,21 @@ export class MessageHandlerService {
       lowerMessage.includes(kw),
     );
 
-    // Determine status
-    let status: TaskStatus | undefined;
+    // Determine status (lowercase for database schema)
+    let status: "todo" | "in_progress" | "done" | "blocked" | "feedback_needed" | undefined;
     let confidence = 0.5;
 
     if (hasCompletionKeyword && taskId) {
-      status = "DONE";
+      status = "done";
       confidence = 0.9;
     } else if (hasBlockedKeyword && taskId) {
-      status = "BLOCKED";
+      status = "blocked";
       confidence = 0.85;
     } else if (needsFeedback && taskId) {
-      status = "FEEDBACK_NEEDED";
+      status = "feedback_needed";
       confidence = 0.8;
     } else if (hasProgressKeyword && taskId) {
-      status = "IN_PROGRESS";
+      status = "in_progress";
       confidence = 0.75;
     }
 
@@ -269,7 +310,7 @@ export class MessageHandlerService {
   private async updateTaskBasedOnAnalysis(
     taskId: string,
     analysis: {
-      status?: TaskStatus;
+      status?: "todo" | "in_progress" | "done" | "blocked" | "feedback_needed";
       confidence?: number;
     },
   ) {
@@ -277,6 +318,18 @@ export class MessageHandlerService {
     if (!analysis.status) {
       return;
     }
+
+    // Convert lowercase AI status to uppercase TaskStatus
+    const statusMap: Record<string, TaskStatus> = {
+      todo: "TODO",
+      in_progress: "IN_PROGRESS",
+      done: "DONE",
+      blocked: "BLOCKED",
+      feedback_needed: "FEEDBACK_NEEDED",
+    };
+
+    const taskStatus = statusMap[analysis.status];
+    if (!taskStatus) return;
 
     const [task] = await db
       .select()
@@ -289,7 +342,7 @@ export class MessageHandlerService {
     }
 
     // Don't update if task is already in the suggested status
-    if (task.status === analysis.status) {
+    if (task.status === taskStatus) {
       return;
     }
 
@@ -297,38 +350,35 @@ export class MessageHandlerService {
     await db
       .update(tasks)
       .set({
-        status: analysis.status,
-        completedAt: analysis.status === "DONE" ? new Date() : undefined,
+        status: taskStatus,
+        completedAt: taskStatus === "DONE" ? new Date() : undefined,
       })
       .where(eq(tasks.id, taskId));
 
-    console.log(
-      `Auto-updated task ${taskId} status to ${analysis.status}`,
-    );
+    console.log(`Auto-updated task ${taskId} status to ${taskStatus}`);
   }
 
   /**
    * Handle message attachments
    */
   private async handleAttachment(
-    event: MatrixEvent,
+    message: proto.IWebMessageInfo,
     taskUpdateId: string,
     taskId?: string,
   ) {
     try {
-      const media = await matrixClient.downloadMedia(event);
-      const content = event.getContent();
+      const media = await baileysClient.downloadMedia(message);
 
       // Save attachment metadata
       await db.insert(taskAttachments).values({
         taskUpdateId,
         taskId: taskId!,
         fileName: media.fileName,
-        fileType: content.msgtype || "m.file",
-        fileSize: media.data.byteLength,
-        storageUrl: content.url || "",
+        fileType: media.contentType,
+        fileSize: media.data.length,
+        storageUrl: "", // Could upload to S3/storage here
         mimeType: media.contentType,
-        matrixMxcUrl: content.url,
+        matrixMxcUrl: "", // Not applicable for Baileys
       });
 
       console.log(

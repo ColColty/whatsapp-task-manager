@@ -13,16 +13,9 @@ export const env = createEnv({
     // Clerk Authentication
     CLERK_SECRET_KEY: z.string().min(1),
 
-    // Matrix/Beeper Configuration for WhatsApp Bridge
-    MATRIX_HOMESERVER_URL: z.string().url(),
-    MATRIX_USER_ID: z.string(),
-    MATRIX_ACCESS_TOKEN: z.string(),
-    MATRIX_DEVICE_ID: z.string().optional(),
-
-    // WhatsApp API (alternative integration - not currently used)
-    WHATSAPP_API_TOKEN: z.string().optional(),
-    WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
-    WHATSAPP_WEBHOOK_VERIFY_TOKEN: z.string().optional(),
+    // WhatsApp Integration via Baileys
+    // Session data is stored in ./whatsapp-session directory
+    // No additional configuration needed - auth happens via QR code scan
 
     // AI/LLM Configuration
     OPENAI_API_KEY: z.string().optional(),
@@ -54,18 +47,10 @@ export const env = createEnv({
 
     // Clerk
     CLERK_SECRET_KEY: process.env.CLERK_SECRET_KEY,
-    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
+    NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:
+      process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
 
-    // Matrix/Beeper
-    MATRIX_HOMESERVER_URL: process.env.MATRIX_HOMESERVER_URL,
-    MATRIX_USER_ID: process.env.MATRIX_USER_ID,
-    MATRIX_ACCESS_TOKEN: process.env.MATRIX_ACCESS_TOKEN,
-    MATRIX_DEVICE_ID: process.env.MATRIX_DEVICE_ID,
-
-    // WhatsApp API
-    WHATSAPP_API_TOKEN: process.env.WHATSAPP_API_TOKEN,
-    WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID,
-    WHATSAPP_WEBHOOK_VERIFY_TOKEN: process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN,
+    // WhatsApp via Baileys - no env vars needed
 
     // AI/LLM
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,

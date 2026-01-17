@@ -81,12 +81,13 @@ export const conversationsRouter = createTRPCRouter({
     }),
 
   /**
-   * Get conversations by Matrix room ID
+   * Get conversations by WhatsApp JID
+   * Note: matrixRoomId field stores WhatsApp JID for Baileys integration
    */
   getByMatrixRoomId: publicProcedure
     .input(
       z.object({
-        matrixRoomId: z.string(),
+        matrixRoomId: z.string(), // Actually WhatsApp JID (legacy field name)
       }),
     )
     .query(async ({ ctx, input }) => {

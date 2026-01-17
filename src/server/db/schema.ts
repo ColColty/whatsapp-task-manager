@@ -68,7 +68,8 @@ export const managers = pgTable(
     email: text("email").notNull().unique(),
     name: text("name"),
     phoneNumber: text("phone_number"),
-    // Matrix/Beeper user ID for WhatsApp bridge integration
+    // WhatsApp integration field (legacy name: matrixUserId)
+    // For Baileys: Not needed, we use phoneNumber directly
     matrixUserId: text("matrix_user_id").unique(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
@@ -123,8 +124,9 @@ export const assignedUsers = pgTable(
       .notNull()
       .references(() => managers.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
-    phoneNumber: text("phone_number").notNull(),
-    // Matrix/Beeper user ID if they get invited to Matrix
+    phoneNumber: text("phone_number").notNull(), // Used for WhatsApp integration via Baileys
+    // WhatsApp integration field (legacy name: matrixUserId)
+    // For Baileys: Not needed, we use phoneNumber directly
     matrixUserId: text("matrix_user_id").unique(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
@@ -156,7 +158,8 @@ export const conversations = pgTable(
     whatsappConversationId: text("whatsapp_conversation_id")
       .notNull()
       .unique(),
-    // Matrix room ID for Beeper bridge integration
+    // WhatsApp integration field (legacy name: matrixRoomId)
+    // For Baileys: Stores WhatsApp group JID (e.g., "120363123456789@g.us")
     matrixRoomId: text("matrix_room_id").unique(),
     name: text("name"),
     type: conversationTypeEnum("type").notNull().default("PERSONAL"),
@@ -237,7 +240,8 @@ export const tasks = pgTable(
     priority: taskPriorityEnum("priority").notNull().default("MEDIUM"),
     dueDate: timestamp("due_date"),
     whatsappMessageId: text("whatsapp_message_id").unique(),
-    // Matrix event ID for the task assignment message
+    // WhatsApp integration field (legacy name: matrixEventId)
+    // For Baileys: Stores WhatsApp message ID for the task assignment message
     matrixEventId: text("matrix_event_id").unique(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
@@ -281,7 +285,8 @@ export const taskUpdates = pgTable(
       .notNull()
       .references(() => assignedUsers.id, { onDelete: "cascade" }),
     whatsappMessageId: text("whatsapp_message_id").notNull().unique(),
-    // Matrix event ID for the update message
+    // WhatsApp integration field (legacy name: matrixEventId)
+    // For Baileys: Stores WhatsApp message ID for the update message
     matrixEventId: text("matrix_event_id").unique(),
     messageText: text("message_text"),
     messageType: messageTypeEnum("message_type").notNull().default("TEXT"),
@@ -331,7 +336,8 @@ export const taskAttachments = pgTable(
     storageUrl: text("storage_url").notNull(),
     mimeType: text("mime_type"),
     whatsappMediaId: text("whatsapp_media_id"),
-    // Matrix MXC URL for media stored in Matrix
+    // WhatsApp integration field (legacy name: matrixMxcUrl)
+    // For Baileys: Not needed, media is downloaded directly
     matrixMxcUrl: text("matrix_mxc_url"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
